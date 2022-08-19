@@ -1,162 +1,295 @@
 import { initializeKeypair } from "./initializeKeypair"
-import * as web3 from "@solana/web3.js"
-import * as token from "@solana/spl-token"
-
-async function createNewMint(
-    connection: web3.Connection,
-    payer: web3.Keypair,
-    mintAuthority: web3.PublicKey,
-    freezeAuthority: web3.PublicKey,
-    decimals: number
-): Promise<web3.PublicKey> {
-    const tokenMint = await token.createMint(
-        connection,
-        payer,
-        mintAuthority,
-        freezeAuthority,
-        decimals
-    )
-
-    console.log(
-        `Token Mint: https://explorer.solana.com/address/${tokenMint}?cluster=devnet`
-    )
-
-    return tokenMint
-}
-
-async function createTokenAccount(
-    connection: web3.Connection,
-    payer: web3.Keypair,
-    mint: web3.PublicKey,
-    owner: web3.PublicKey
-) {
-    const tokenAccount = await token.getOrCreateAssociatedTokenAccount(
-        connection,
-        payer,
-        mint,
-        owner
-    )
-
-    console.log(
-        `Token Account: https://explorer.solana.com/address/${tokenAccount.address}?cluster=devnet`
-    )
-
-    return tokenAccount
-}
-
-async function mintTokens(
-    connection: web3.Connection,
-    payer: web3.Keypair,
-    mint: web3.PublicKey,
-    destination: web3.PublicKey,
-    authority: web3.Keypair,
-    amount: number
-) {
-    const transactionSignature = await token.mintTo(
-        connection,
-        payer,
-        mint,
-        destination,
-        authority,
-        amount
-    )
-
-    console.log(
-        `Mint Token Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
-    )
-}
-
-async function transferTokens(
-    connection: web3.Connection,
-    payer: web3.Keypair,
-    source: web3.PublicKey,
-    destination: web3.PublicKey,
-    owner: web3.Keypair,
-    amount: number
-) {
-    const transactionSignature = await token.transfer(
-        connection,
-        payer,
-        source,
-        destination,
-        owner,
-        amount
-    )
-
-    console.log(
-        `Transfer Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
-    )
-}
-
-async function burnTokens(
-    connection: web3.Connection,
-    payer: web3.Keypair,
-    account: web3.PublicKey,
-    mint: web3.PublicKey,
-    owner: web3.Keypair,
-    amount: number
-) {
-    const transactionSignature = await token.burn(
-        connection,
-        payer,
-        account,
-        mint,
-        owner,
-        amount
-    )
-
-    console.log(
-        `Burn Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
-    )
-}
+import {
+  Metaplex,
+  keypairIdentity,
+  bundlrStorage,
+  toMetaplexFile,
+  findMetadataPda,
+} from "@metaplex-foundation/js"
+import {
+  Connection,
+  clusterApiUrl,
+  Transaction,
+  sendAndConfirmTransaction,
+  Keypair,
+  PublicKey,
+} from "@solana/web3.js"
+import {
+  mintTo,
+  getOrCreateAssociatedTokenAccount,
+  createMint,
+  getMint,
+} from "@solana/spl-token"
+import {
+  DataV2,
+  createCreateMetadataAccountV2Instruction,
+  createUpdateMetadataAccountV2Instruction,
+} from "@metaplex-foundation/mpl-token-metadata"
+import * as fs from "fs"
 
 async function main() {
-    const connection = new web3.Connection(web3.clusterApiUrl("devnet"))
-    const user = await initializeKeypair(connection)
+  const connection = new Connection(clusterApiUrl("devnet"))
+  const user = await initializeKeypair(connection)
 
-    const mint = await createNewMint(
-        connection,
-        user,
-        user.publicKey,
-        user.publicKey,
-        2
+  // metaplex setup
+  const metaplex = Metaplex.make(connection)
+    .use(keypairIdentity(user))
+    .use(
+      bundlrStorage({
+        address: "https://devnet.bundlr.network",
+        providerUrl: "https://api.devnet.solana.com",
+        timeout: 60000,
+      })
     )
 
-    const tokenAccount = await createTokenAccount(
-        connection,
-        user,
-        mint,
-        user.publicKey
+  // helper function to create new mint
+  const tokenMint = await createNewMint(
+    connection,
+    user,
+    user.publicKey,
+    user.publicKey,
+    2
+  )
+
+  // helper function to create metadata account
+  await createMetadata(
+    connection,
+    metaplex,
+    tokenMint,
+    user,
+    "token name",
+    "symbol",
+    "description"
+  )
+
+  // helper function to update metadata account
+  await updateMetadata(
+    connection,
+    metaplex,
+    tokenMint,
+    user,
+    "update name",
+    "new symbol",
+    "update description"
+  )
+
+  // helper function to get or create associated token account and mint tokens
+  await mintTokenHelper(connection, user, tokenMint, user, 1)
+}
+
+async function createNewMint(
+  connection: Connection,
+  payer: Keypair,
+  mintAuthority: PublicKey,
+  freezeAuthority: PublicKey,
+  decimals: number
+): Promise<PublicKey> {
+  // create new token mint
+  const tokenMint = await createMint(
+    connection,
+    payer,
+    mintAuthority,
+    freezeAuthority,
+    decimals
+  )
+
+  console.log(
+    `Token Mint: https://explorer.solana.com/address/${tokenMint}?cluster=devnet`
+  )
+
+  return tokenMint
+}
+
+async function createMetadata(
+  connection: Connection,
+  metaplex: Metaplex,
+  mint: PublicKey,
+  user: Keypair,
+  name: string,
+  symbol: string,
+  description: string
+) {
+  // file to buffer
+  const buffer = fs.readFileSync("src/test.png")
+
+  // buffer to metaplex file
+  const file = toMetaplexFile(buffer, "test.png")
+
+  // upload image and get image uri
+  const imageUri = await metaplex.storage().upload(file)
+  console.log("image uri:", imageUri)
+
+  // upload metadata and get metadata uri (off chain metadata)
+  const { uri } = await metaplex
+    .nfts()
+    .uploadMetadata({
+      name: name,
+      description: description,
+      image: imageUri,
+    })
+    .run()
+
+  console.log("metadata uri:", uri)
+
+  // get metadata account address
+  const metadataPDA = await findMetadataPda(mint)
+
+  // onchain metadata format
+  const tokenMetadata = {
+    name: name,
+    symbol: symbol,
+    uri: uri,
+    sellerFeeBasisPoints: 0,
+    creators: null,
+    collection: null,
+    uses: null,
+  } as DataV2
+
+  // transaction to create metadata account
+  const transaction = new Transaction().add(
+    createCreateMetadataAccountV2Instruction(
+      {
+        metadata: metadataPDA,
+        mint: mint,
+        mintAuthority: user.publicKey,
+        payer: user.publicKey,
+        updateAuthority: user.publicKey,
+      },
+      {
+        createMetadataAccountArgsV2: {
+          data: tokenMetadata,
+          isMutable: true,
+        },
+      }
     )
+  )
 
-    await mintTokens(connection, user, mint, tokenAccount.address, user, 100)
+  // send transaction
+  const transactionSignature = await sendAndConfirmTransaction(
+    connection,
+    transaction,
+    [user]
+  )
 
-    const receiver = web3.Keypair.generate().publicKey
-    const receiverTokenAccount = await createTokenAccount(
-        connection,
-        user,
-        mint,
-        receiver
+  console.log(
+    `Create Metadata Account: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
+  )
+}
+
+async function updateMetadata(
+  connection: Connection,
+  metaplex: Metaplex,
+  mint: PublicKey,
+  user: Keypair,
+  name: string,
+  symbol: string,
+  description: string
+) {
+  // file to buffer
+  const buffer = fs.readFileSync("src/update.gif")
+
+  // buffer to metaplex file
+  const file = toMetaplexFile(buffer, "update.gif")
+
+  // upload image and get image uri
+  const imageUri = await metaplex.storage().upload(file)
+  console.log("image uri:", imageUri)
+
+  // upload metadata and get metadata uri (off chain metadata)
+  const { uri } = await metaplex
+    .nfts()
+    .uploadMetadata({
+      name: name,
+      description: description,
+      image: imageUri,
+    })
+    .run()
+
+  console.log("metadata uri:", uri)
+
+  // get metadata account address
+  const metadataPDA = await findMetadataPda(mint)
+
+  // onchain metadata format
+  const tokenMetadata = {
+    name: name,
+    symbol: symbol,
+    uri: uri,
+    sellerFeeBasisPoints: 0,
+    creators: null,
+    collection: null,
+    uses: null,
+  } as DataV2
+
+  // transactin to update metadata account
+  const transaction = new Transaction().add(
+    createUpdateMetadataAccountV2Instruction(
+      {
+        metadata: metadataPDA,
+        updateAuthority: user.publicKey,
+      },
+      {
+        updateMetadataAccountArgsV2: {
+          data: tokenMetadata,
+          updateAuthority: user.publicKey,
+          primarySaleHappened: true,
+          isMutable: true,
+        },
+      }
     )
+  )
 
-    await transferTokens(
-        connection,
-        user,
-        tokenAccount.address,
-        receiverTokenAccount.address,
-        user,
-        50
-    )
+  // send transaction
+  const transactionSignature = await sendAndConfirmTransaction(
+    connection,
+    transaction,
+    [user]
+  )
 
-    await burnTokens(connection, user, tokenAccount.address, mint, user, 25)
+  console.log(
+    `Update Metadata Account: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
+  )
+}
+
+async function mintTokenHelper(
+  connection: Connection,
+  payer: Keypair,
+  mint: PublicKey,
+  authority: Keypair,
+  amount: number
+) {
+  // get or create assoicated token account
+  const tokenAccount = await getOrCreateAssociatedTokenAccount(
+    connection,
+    payer,
+    mint,
+    payer.publicKey
+  )
+
+  // get mint info (to adjust for decimals when minting)
+  const mintInfo = await getMint(connection, mint)
+
+  // mint tokens
+  const transactionSignature = await mintTo(
+    connection,
+    payer,
+    mint,
+    tokenAccount.address,
+    authority,
+    amount * 10 ** mintInfo.decimals
+  )
+
+  console.log(
+    `Mint Token Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
+  )
 }
 
 main()
-    .then(() => {
-        console.log("Finished successfully")
-        process.exit(0)
-    })
-    .catch((error) => {
-        console.log(error)
-        process.exit(1)
-    })
+  .then(() => {
+    console.log("Finished successfully")
+    process.exit(0)
+  })
+  .catch((error) => {
+    console.log(error)
+    process.exit(1)
+  })
