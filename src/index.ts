@@ -5,13 +5,20 @@ import {
   Transaction,
   sendAndConfirmTransaction,
   Keypair,
-  PublicKey,
+  SystemProgram,
 } from "@solana/web3.js"
 import {
-  mintTo,
-  getOrCreateAssociatedTokenAccount,
-  createMint,
-  getMint,
+  createInitializeMintInstruction,
+  getMinimumBalanceForRentExemptMint,
+  getAssociatedTokenAddress,
+  MINT_SIZE,
+  TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountInstruction,
+  Account,
+  TokenAccountNotFoundError,
+  TokenInvalidAccountOwnerError,
+  getAccount,
+  createMintToInstruction,
 } from "@solana/spl-token"
 import {
   Metaplex,
@@ -23,15 +30,35 @@ import {
 import {
   DataV2,
   createCreateMetadataAccountV2Instruction,
-  createUpdateMetadataAccountV2Instruction,
 } from "@metaplex-foundation/mpl-token-metadata"
 import * as fs from "fs"
+
+const tokenName = "Token Name"
+const description = "Description"
+const symbol = "SYMBOL"
+const decimals = 2
+const amount = 1
 
 async function main() {
   const connection = new Connection(clusterApiUrl("devnet"))
   const user = await initializeKeypair(connection)
 
   console.log("PublicKey:", user.publicKey.toBase58())
+
+  // rent for token mint
+  const lamports = await getMinimumBalanceForRentExemptMint(connection)
+
+  // keypair for new token mint
+  const mintKeypair = Keypair.generate()
+
+  // get metadata PDA for token mint
+  const metadataPDA = await findMetadataPda(mintKeypair.publicKey)
+
+  // get associated token account address for use
+  const tokenATA = await getAssociatedTokenAddress(
+    mintKeypair.publicKey,
+    user.publicKey
+  )
 
   // metaplex setup
   const metaplex = Metaplex.make(connection)
@@ -44,106 +71,6 @@ async function main() {
       })
     )
 
-  // helper function to create new mint
-  const tokenMint = await createNewMint(
-    connection,
-    user,
-    user.publicKey,
-    user.publicKey,
-    2
-  )
-
-  // helper function to create metadata account
-  await createMetadata(
-    connection,
-    metaplex,
-    tokenMint,
-    user,
-    "token name",
-    "symbol",
-    "description"
-  )
-
-  // helper function to update metadata account
-  await updateMetadata(
-    connection,
-    metaplex,
-    tokenMint,
-    user,
-    "update name",
-    "new symbol",
-    "update description"
-  )
-
-  // helper function to get or create associated token account and mint tokens
-  await mintTokenHelper(connection, user, tokenMint, user, 1)
-}
-
-async function createNewMint(
-  connection: Connection,
-  payer: Keypair,
-  mintAuthority: PublicKey,
-  freezeAuthority: PublicKey,
-  decimals: number
-): Promise<PublicKey> {
-  // create new token mint
-  const tokenMint = await createMint(
-    connection,
-    payer,
-    mintAuthority,
-    freezeAuthority,
-    decimals
-  )
-
-  console.log(
-    `Token Mint: https://explorer.solana.com/address/${tokenMint}?cluster=devnet`
-  )
-
-  return tokenMint
-}
-
-async function mintTokenHelper(
-  connection: Connection,
-  payer: Keypair,
-  mint: PublicKey,
-  authority: Keypair,
-  amount: number
-) {
-  // get or create assoicated token account
-  const tokenAccount = await getOrCreateAssociatedTokenAccount(
-    connection,
-    payer,
-    mint,
-    payer.publicKey
-  )
-
-  // get mint info (to adjust for decimals when minting)
-  const mintInfo = await getMint(connection, mint)
-
-  // mint tokens
-  const transactionSignature = await mintTo(
-    connection,
-    payer,
-    mint,
-    tokenAccount.address,
-    authority,
-    amount * 10 ** mintInfo.decimals
-  )
-
-  console.log(
-    `Mint Token Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
-  )
-}
-
-async function createMetadata(
-  connection: Connection,
-  metaplex: Metaplex,
-  mint: PublicKey,
-  user: Keypair,
-  name: string,
-  symbol: string,
-  description: string
-) {
   // file to buffer
   const buffer = fs.readFileSync("src/test.png")
 
@@ -158,7 +85,7 @@ async function createMetadata(
   const { uri } = await metaplex
     .nfts()
     .uploadMetadata({
-      name: name,
+      name: tokenName,
       description: description,
       image: imageUri,
     })
@@ -166,12 +93,9 @@ async function createMetadata(
 
   console.log("metadata uri:", uri)
 
-  // get metadata account address
-  const metadataPDA = await findMetadataPda(mint)
-
   // onchain metadata format
   const tokenMetadata = {
-    name: name,
+    name: tokenName,
     symbol: symbol,
     uri: uri,
     sellerFeeBasisPoints: 0,
@@ -182,10 +106,27 @@ async function createMetadata(
 
   // transaction to create metadata account
   const transaction = new Transaction().add(
+    // create new account
+    SystemProgram.createAccount({
+      fromPubkey: user.publicKey,
+      newAccountPubkey: mintKeypair.publicKey,
+      space: MINT_SIZE,
+      lamports: lamports,
+      programId: TOKEN_PROGRAM_ID,
+    }),
+    // create new token mint
+    createInitializeMintInstruction(
+      mintKeypair.publicKey,
+      decimals,
+      user.publicKey,
+      user.publicKey,
+      TOKEN_PROGRAM_ID
+    ),
+    // create metadata account
     createCreateMetadataAccountV2Instruction(
       {
         metadata: metadataPDA,
-        mint: mint,
+        mint: mintKeypair.publicKey,
         mintAuthority: user.publicKey,
         payer: user.publicKey,
         updateAuthority: user.publicKey,
@@ -199,78 +140,42 @@ async function createMetadata(
     )
   )
 
-  // send transaction
-  const transactionSignature = await sendAndConfirmTransaction(
-    connection,
-    transaction,
-    [user]
+  // instruction to create ATA
+  const createTokenAccountInstruction = createAssociatedTokenAccountInstruction(
+    user.publicKey, // payer
+    tokenATA, // token address
+    user.publicKey, // token owner
+    mintKeypair.publicKey // token mint
   )
 
-  console.log(
-    `Create Metadata Account: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
-  )
-}
+  let tokenAccount: Account
+  try {
+    // check if token account already exists
+    tokenAccount = await getAccount(
+      connection, // connection
+      tokenATA // token address
+    )
+  } catch (error: unknown) {
+    if (
+      error instanceof TokenAccountNotFoundError ||
+      error instanceof TokenInvalidAccountOwnerError
+    ) {
+      try {
+        // add instruction to create token account if one does not exist
+        transaction.add(createTokenAccountInstruction)
+      } catch (error: unknown) {}
+    } else {
+      throw error
+    }
+  }
 
-async function updateMetadata(
-  connection: Connection,
-  metaplex: Metaplex,
-  mint: PublicKey,
-  user: Keypair,
-  name: string,
-  symbol: string,
-  description: string
-) {
-  // file to buffer
-  const buffer = fs.readFileSync("src/update.gif")
-
-  // buffer to metaplex file
-  const file = toMetaplexFile(buffer, "update.gif")
-
-  // upload image and get image uri
-  const imageUri = await metaplex.storage().upload(file)
-  console.log("image uri:", imageUri)
-
-  // upload metadata and get metadata uri (off chain metadata)
-  const { uri } = await metaplex
-    .nfts()
-    .uploadMetadata({
-      name: name,
-      description: description,
-      image: imageUri,
-    })
-    .run()
-
-  console.log("metadata uri:", uri)
-
-  // get metadata account address
-  const metadataPDA = await findMetadataPda(mint)
-
-  // onchain metadata format
-  const tokenMetadata = {
-    name: name,
-    symbol: symbol,
-    uri: uri,
-    sellerFeeBasisPoints: 0,
-    creators: null,
-    collection: null,
-    uses: null,
-  } as DataV2
-
-  // transactin to update metadata account
-  const transaction = new Transaction().add(
-    createUpdateMetadataAccountV2Instruction(
-      {
-        metadata: metadataPDA,
-        updateAuthority: user.publicKey,
-      },
-      {
-        updateMetadataAccountArgsV2: {
-          data: tokenMetadata,
-          updateAuthority: user.publicKey,
-          primarySaleHappened: true,
-          isMutable: true,
-        },
-      }
+  transaction.add(
+    // mint tokens to token account
+    createMintToInstruction(
+      mintKeypair.publicKey,
+      tokenATA,
+      user.publicKey,
+      amount * Math.pow(10, decimals)
     )
   )
 
@@ -278,11 +183,11 @@ async function updateMetadata(
   const transactionSignature = await sendAndConfirmTransaction(
     connection,
     transaction,
-    [user]
+    [user, mintKeypair]
   )
 
   console.log(
-    `Update Metadata Account: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
+    `Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
   )
 }
 
