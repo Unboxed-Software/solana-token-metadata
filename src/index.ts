@@ -1,12 +1,5 @@
 import { initializeKeypair } from "./initializeKeypair"
 import {
-  Metaplex,
-  keypairIdentity,
-  bundlrStorage,
-  toMetaplexFile,
-  findMetadataPda,
-} from "@metaplex-foundation/js"
-import {
   Connection,
   clusterApiUrl,
   Transaction,
@@ -21,6 +14,13 @@ import {
   getMint,
 } from "@solana/spl-token"
 import {
+  Metaplex,
+  keypairIdentity,
+  bundlrStorage,
+  toMetaplexFile,
+  findMetadataPda,
+} from "@metaplex-foundation/js"
+import {
   DataV2,
   createCreateMetadataAccountV2Instruction,
   createUpdateMetadataAccountV2Instruction,
@@ -30,6 +30,8 @@ import * as fs from "fs"
 async function main() {
   const connection = new Connection(clusterApiUrl("devnet"))
   const user = await initializeKeypair(connection)
+
+  console.log("PublicKey:", user.publicKey.toBase58())
 
   // metaplex setup
   const metaplex = Metaplex.make(connection)
@@ -98,6 +100,39 @@ async function createNewMint(
   )
 
   return tokenMint
+}
+
+async function mintTokenHelper(
+  connection: Connection,
+  payer: Keypair,
+  mint: PublicKey,
+  authority: Keypair,
+  amount: number
+) {
+  // get or create assoicated token account
+  const tokenAccount = await getOrCreateAssociatedTokenAccount(
+    connection,
+    payer,
+    mint,
+    payer.publicKey
+  )
+
+  // get mint info (to adjust for decimals when minting)
+  const mintInfo = await getMint(connection, mint)
+
+  // mint tokens
+  const transactionSignature = await mintTo(
+    connection,
+    payer,
+    mint,
+    tokenAccount.address,
+    authority,
+    amount * 10 ** mintInfo.decimals
+  )
+
+  console.log(
+    `Mint Token Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
+  )
 }
 
 async function createMetadata(
@@ -248,39 +283,6 @@ async function updateMetadata(
 
   console.log(
     `Update Metadata Account: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
-  )
-}
-
-async function mintTokenHelper(
-  connection: Connection,
-  payer: Keypair,
-  mint: PublicKey,
-  authority: Keypair,
-  amount: number
-) {
-  // get or create assoicated token account
-  const tokenAccount = await getOrCreateAssociatedTokenAccount(
-    connection,
-    payer,
-    mint,
-    payer.publicKey
-  )
-
-  // get mint info (to adjust for decimals when minting)
-  const mintInfo = await getMint(connection, mint)
-
-  // mint tokens
-  const transactionSignature = await mintTo(
-    connection,
-    payer,
-    mint,
-    tokenAccount.address,
-    authority,
-    amount * 10 ** mintInfo.decimals
-  )
-
-  console.log(
-    `Mint Token Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
   )
 }
 
